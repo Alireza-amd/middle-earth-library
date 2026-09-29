@@ -1,0 +1,1 @@
+ALTER TABLE "sliders" ADD COLUMN "link" varchar NOT NULL;

@@ -1,0 +1,195 @@
+import { getCurrentUser } from "@/auth/currentUser";
+import { db } from "@/drizzle/db";
+import {
+  authorTable,
+  bookCategoryTable,
+  bookTable,
+  categoryTable,
+  reserveTable,
+  UNAVAILABLE_BOOK_STATUSES,
+} from "@/drizzle/schema";
+import { getAuthorIdTag } from "@/features/author/db/cache";
+import { getBookIdTag } from "@/features/book/db/cache";
+import {
+  getCategoryGlobalTag,
+  getCategoryIdTag,
+} from "@/features/category/db/cache";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import Image from "next/image";
+import Link from "next/link";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { getReserveGlobalTag } from "@/features/reserve/db/cache";
+import { getAuthorTag, getBookTag, getCategoryTag } from "@/lib/cacheTag";
+import { eq, sql } from "drizzle-orm";
+import { cacheTag } from "next/cache";
+import { Suspense } from "react";
+import { PageHeader } from "@/components/PageHeader";
+
+export default function CategoryIdPage({
+  params,
+}: {
+  params: Promise<{ categoryId: string }>;
+}) {
+  return (
+    <div className="container">
+      <Suspense fallback="Loading...">
+        <CategoryId params={params} />
+      </Suspense>
+    </div>
+  );
+}
+
+async function CategoryId({
+  params,
+}: {
+  params: Promise<{ categoryId: string }>;
+}) {
+  const { categoryId } = await params;
+  const category = await getCategoryId(categoryId);
+  const books = await getBooksByCategory(categoryId);
+
+  return (
+    <>
+      <PageHeader title={`${category.title} Books`} />
+      {books ? (
+        <div className="grid  grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+          {books.map((book) => (
+            <Card key={book.id}>
+              <CardHeader>
+                <CardTitle className="font-pop flex justify-between">
+                  <span>{book.title}</span>
+                  <span className="text-gray-400 size-8 flex items-center justify-center rounded-full bg-gray-700">
+                    {book.availableCount}
+                  </span>
+                </CardTitle>
+                <CardDescription className="h-15 line-clamp-3">
+                  {book.desc}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex flex-col items-start gap-4">
+                  <Link
+                    className=" bg-amber-100 text-amber-500"
+                    href={`/authors/${book.author.id}`}
+                  >
+                    {book.author.name}
+                  </Link>
+                  <div className="flex gap-1 flex-wrap h-14 truncate">
+                    {book.bookCategories.map((category) => (
+                      <Link key={category.id} href={`/category/${category.id}`}>
+                        <Badge className="text-sm font-mono">
+                          {category.title}
+                        </Badge>
+                      </Link>
+                    ))}
+                  </div>
+                  <div className="aspect-square relative w-full">
+                    <Image src={book.imagePath} alt="bookImage" fill />
+                  </div>
+                </div>
+              </CardContent>
+              <CardFooter>
+                <Button
+                  asChild
+                  className="w-full hover:bg-amber-100 hover:text-amber-500 text-amber-100 bg-amber-500"
+                  variant="outline"
+                >
+                  <Link href={`/books/${book.id}`}>Details</Link>
+                </Button>
+              </CardFooter>
+            </Card>
+          ))}
+        </div>
+      ) : (
+        <h1>There is no book yet.</h1>
+      )}
+    </>
+  );
+}
+
+async function getCategoryId(id: string) {
+  "use cache";
+
+  const category = await db.query.categoryTable.findFirst({
+    columns: { id: true, title: true },
+    where: eq(categoryTable.id, id),
+  });
+
+  if (category == null) throw new Error("There is no category with this id.");
+
+  cacheTag(getCategoryIdTag(id));
+
+  return category;
+}
+
+async function getBooksByCategory(categoryId: string) {
+  "use cache";
+
+  cacheTag(
+    getCategoryTag("book", categoryId),
+    getCategoryGlobalTag(),
+    getReserveGlobalTag(),
+  );
+
+  const books = await db.query.bookTable.findMany({
+    where: (book, { exists, eq, and }) =>
+      exists(
+        db
+          .select()
+          .from(bookCategoryTable)
+          .where(
+            and(
+              eq(bookCategoryTable.bookId, book.id),
+              eq(bookCategoryTable.categoryId, categoryId),
+            ),
+          ),
+      ),
+    columns: { id: true, desc: true, imagePath: true, title: true },
+    with: {
+      author: { columns: { id: true, name: true } },
+      bookCategories: {
+        columns: {},
+        with: { category: { columns: { id: true, title: true } } },
+      },
+    },
+  });
+
+  const bookEntity = await db
+    .select({
+      id: bookTable.id,
+      entity: bookTable.entity,
+      reserveCount: sql<number>`
+      COUNT(CASE 
+        WHEN ${reserveTable.status} IN ${sql.raw(`('${UNAVAILABLE_BOOK_STATUSES.join("','")}')`)}
+        THEN ${reserveTable.id} 
+      END)
+    `,
+    })
+    .from(bookTable)
+    .leftJoin(reserveTable, eq(bookTable.id, reserveTable.bookId))
+    .groupBy(bookTable.id);
+
+  const bookEntityMap = new Map(
+    bookEntity.map((book) => [book.id, book.entity - book.reserveCount]),
+  );
+
+  const bookInfo = books.map((book) => ({
+    ...book,
+    availableCount: bookEntityMap.get(book.id),
+    bookCategories: book.bookCategories.map(
+      (bookCategory) => bookCategory.category,
+    ),
+  }));
+
+  bookInfo.forEach((book) => cacheTag(getAuthorIdTag(book.author.id)));
+
+  return bookInfo;
+}

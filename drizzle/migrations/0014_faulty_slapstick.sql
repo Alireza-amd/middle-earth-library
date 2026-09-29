@@ -1,0 +1,1 @@
+ALTER TYPE "public"."reserve_status" ADD VALUE 'cancelled';
